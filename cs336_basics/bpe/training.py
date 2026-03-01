@@ -54,7 +54,6 @@ def train_bpe(
 class PairCounter:
     _inner: Counter[tuple[bytes, bytes]]
     _count_to_key: dict[int, set[tuple[bytes, bytes]]]
-    _max_count: int
 
     def __init__(self) -> None:
         self._inner = Counter()
@@ -75,13 +74,33 @@ class PairCounter:
         return best_pair
     
     def add(self, pair: tuple[bytes, bytes], count: int):
+        assert count > 0
         prev_total = self._inner[pair]
         self._inner[pair] += count
         curr_total = self._inner[pair]
         if prev_total in self._count_to_key:
             self._count_to_key[prev_total].remove(pair)
-        self._count_to_key.get(curr_total, set()).add(pair)
+            if len(self._count_to_key[prev_total]) == 0:
+                del self._count_to_key[prev_total]
+        self._count_to_key.setdefault(curr_total, set()).add(pair)
+        self._max_count = max(self._max_count, curr_total)
         return self._inner[pair]
+    
+    def delete(self, pair: tuple[bytes, bytes]):
+        assert pair in self._inner
+        count = self._inner[pair]
+        del self._inner[pair]
+        assert pair in self._count_to_key[count]
+        self._count_to_key[count].remove(pair)
+        if len(self._count_to_key[count]) == 0:
+            del self._count_to_key[count]
+            if count == self._max_count:
+                if len(self._inner) > 0:
+                    # scan the entire pairs to find maximum count for now, could use heap to keep track of second largest count
+                    self._max_count = self._inner.most_common(1)[0][1]
+                else:
+                    self._max_count = 0
+
 
     def _is_right_greater_pair(self, left: tuple[bytes, bytes], right: tuple[bytes, bytes]) -> bool:
         """
