@@ -44,7 +44,7 @@ def train_bpe(
 
     for token, count in pre_tokens.items():
         for i in range(len(token) - 1):
-            pairs.add((bytes(token[i]), bytes(token[i + 1])), count)
+            pairs.add((bytes([token[i]]), bytes([token[i + 1]])), count)
 
     # merge most common pair in pre_tokens and count again until we have vocab_size
     merges = []
@@ -53,7 +53,7 @@ def train_bpe(
 
 class PairCounter:
     _inner: Counter[tuple[bytes, bytes]]
-    _count_to_key: dict[int, list[tuple[bytes, bytes]]]
+    _count_to_key: dict[int, set[tuple[bytes, bytes]]]
     _max_count: int
 
     def __init__(self) -> None:
@@ -61,19 +61,26 @@ class PairCounter:
         self._count_to_key = {}
         self._max_count = 0
 
+    def __len__(self):
+        return len(self._inner)
+
     def most_common(self) -> tuple[bytes, bytes]:
         assert self._max_count > 0, "most_common should only be called when there is already pairs here"
-        candidate_pairs = self._count_to_key[self._max_count]
-        best_pair = candidate_pairs[0]
-        for i in range(1, len(candidate_pairs)):
-            candidate_pair = candidate_pairs[i]
+        candidate_pairs = iter(self._count_to_key[self._max_count])
+        best_pair = next(candidate_pairs)
+        for candidate_pair in candidate_pairs:
             # lexicographically greater pair wins
             if self._is_right_greater_pair(best_pair, candidate_pair):
                 best_pair = candidate_pair
         return best_pair
     
     def add(self, pair: tuple[bytes, bytes], count: int):
+        prev_total = self._inner[pair]
         self._inner[pair] += count
+        curr_total = self._inner[pair]
+        if prev_total in self._count_to_key:
+            self._count_to_key[prev_total].remove(pair)
+        self._count_to_key.get(curr_total, set()).add(pair)
         return self._inner[pair]
 
     def _is_right_greater_pair(self, left: tuple[bytes, bytes], right: tuple[bytes, bytes]) -> bool:
