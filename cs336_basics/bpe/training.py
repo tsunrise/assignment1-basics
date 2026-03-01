@@ -33,79 +33,132 @@ def train_bpe(
         data = f.read()
 
     # pre-tokenize the data
-    pre_tokens = Counter()
+    pre_tokens_counter: Counter[bytes] = Counter()
     for pre_token in pre_tokenize(data):
-        pre_tokens[tuple(pre_token)] += 1
+        pre_tokens_counter[pre_token] += 1
+
+    pre_tokens = list((list(bytes(t) for t in token), count) for token, count in pre_tokens_counter.items())
 
     # initialize vocab as byte 0 to 255
     vocabs = [bytes(i) for i in range(256)]
     vocabs_to_idx = {bytes(i): i for i in range(256)}
-    pairs = PairCounter()
+    pairs = PairPositions()
 
-    for token, count in pre_tokens.items():
+    for pretoken_idx, (token, count) in enumerate(pre_tokens):
         for i in range(len(token) - 1):
-            pairs.add((bytes([token[i]]), bytes([token[i + 1]])), count)
+            pairs.add((token[i], token[i+1]), count, pretoken_idx)
 
     # merge most common pair in pre_tokens and count again until we have vocab_size
     merges = []
     while len(vocabs) > vocab_size:
-        most_common_pair_left, most_common_pair_right = pairs.most_common()
-        new_word = most_common_pair_left + most_common_pair_right
-        vocabs.append(new_word)
-        vocabs_to_idx[new_word] = len(vocabs_to_idx)
+        (most_common_pair_left, most_common_pair_right), pretoken_idxs = pairs.most_common()
+        merged_token = most_common_pair_left + most_common_pair_right
+        vocabs.append(merged_token)
+        vocabs_to_idx[merged_token] = len(vocabs_to_idx)
+        merges.append((most_common_pair_left, most_common_pair_right))
+        pairs.delete((most_common_pair_left, most_common_pair_right))
+
+        # only look at pretokens where most common pair is in
+        # most common pairs after merge must include currently merged token
+        # so we could look for potential most common pairs in the same time
+        for pretoken_idx in pretoken_idxs:
+            old_pre_token, count = pre_tokens[pretoken_idx]
+            new_pre_token = []
+
+            i = 0
+            while i < len(old_pre_token) - 1:
+                if old_pre_token[i] == most_common_pair_left and old_pre_token[i+1] == most_common_pair_right:
+                    new_pre_token.append(merged_token)
+                    # Suppose we have A B C D and B C are merged pair
+                    # we need to add B C
+                else:
+                    new_pre_token.append(old_pre_token[i])
+                    i += 1
 
 
         
 
-class PairCounter:
-    _inner: Counter[tuple[bytes, bytes]]
-    _count_to_key: dict[int, set[tuple[bytes, bytes]]]
+class PairPositions:
+    _pair_to_count_indices: dict[tuple[bytes, bytes], tuple[int, set[int]]] # pair to count and pretoken indices
+    _count_to_pair: dict[int, set[tuple[bytes, bytes]]]
+    _max_count: int
+    _max_count_up_to_date: bool
 
     def __init__(self) -> None:
-        self._inner = Counter()
-        self._count_to_key = {}
+        self._pair_to_count_indices = {}
+        self._count_to_pair = {}
         self._max_count = 0
+        self._max_count_up_to_date = True
 
     def __len__(self):
-        return len(self._inner)
+        return len(self._pair_to_count_indices)
 
-    def most_common(self) -> tuple[bytes, bytes]:
+    def most_common(self) -> tuple[tuple[bytes, bytes], set[int]]:
+        """
+        Return the most common pair and pre-token ids where it's in.
+        """
+        assert self._max_count_up_to_date is True, "max_count need to be recomputed"
         assert self._max_count > 0, "most_common should only be called when there is already pairs here"
-        candidate_pairs = iter(self._count_to_key[self._max_count])
+        candidate_pairs = iter(self._count_to_pair[self._max_count])
         best_pair = next(candidate_pairs)
         for candidate_pair in candidate_pairs:
             # lexicographically greater pair wins
             if self._is_right_greater_pair(best_pair, candidate_pair):
                 best_pair = candidate_pair
-        return best_pair
+        return best_pair, self._pair_to_count_indices[best_pair][1]
     
-    def add(self, pair: tuple[bytes, bytes], count: int):
+    def add(self, pair: tuple[bytes, bytes], count: int, pretoken_idx: int):
         assert count > 0
-        prev_total = self._inner[pair]
-        self._inner[pair] += count
-        curr_total = self._inner[pair]
-        if prev_total in self._count_to_key:
-            self._count_to_key[prev_total].remove(pair)
-            if len(self._count_to_key[prev_total]) == 0:
-                del self._count_to_key[prev_total]
-        self._count_to_key.setdefault(curr_total, set()).add(pair)
-        self._max_count = max(self._max_count, curr_total)
-        return self._inner[pair]
-    
+        if pair not in self._pair_to_count_indices:
+            self._pair_to_count_indices[pair] = 0, set()
+        prev_total, pretoken_ids = self._pair_to_count_indices[pair]
+        curr_total = prev_total + count
+        pretoken_ids.add(pretoken_idx)
+        self._pair_to_count_indices[pair] = curr_total, pretoken_ids
+        if prev_total in self._count_to_pair:
+            self._count_to_pair[prev_total].remove(pair)
+            if len(self._count_to_pair[prev_total]) == 0:
+                del self._count_to_pair[prev_total]
+        self._count_to_pair.setdefault(curr_total, set()).add(pair)
+        if self._max_count_up_to_date:
+            self._max_count = max(self._max_count, curr_total)
+
     def delete(self, pair: tuple[bytes, bytes]):
-        assert pair in self._inner
-        count = self._inner[pair]
-        del self._inner[pair]
-        assert pair in self._count_to_key[count]
-        self._count_to_key[count].remove(pair)
-        if len(self._count_to_key[count]) == 0:
-            del self._count_to_key[count]
+        count, _ = self._pair_to_count_indices[pair]
+        del self._pair_to_count_indices[pair]
+        assert pair in self._count_to_pair[count]
+        self._count_to_pair[count].remove(pair)
+        if len(self._count_to_pair[count]) == 0:
+            del self._count_to_pair[count]
             if count == self._max_count:
-                if len(self._inner) > 0:
-                    # scan the entire pairs to find maximum count for now, could use heap to keep track of second largest count
-                    self._max_count = self._inner.most_common(1)[0][1]
-                else:
-                    self._max_count = 0
+                self._max_count_up_to_date = False
+
+    def decrement(self, pair: tuple[bytes, bytes], count: int):
+        old_count, pretoken_idx = self._pair_to_count_indices[pair]
+        new_count = old_count - count
+        assert new_count >= 0
+        if new_count == 0:
+            self.delete(pair)
+        else:
+            self._pair_to_count_indices[pair] = new_count, pretoken_idx
+            self._count_to_pair[old_count].remove(pair)
+            if len(self._count_to_pair[old_count]) == 0:
+                del self._count_to_pair[old_count]
+                if old_count == self._max_count:
+                    self._max_count_up_to_date = False
+    
+    def remove_pretoken_idx_from_pair(self, pair: tuple[bytes, bytes], pretoken_idx: int):
+        assert pretoken_idx in self._pair_to_count_indices[pair][1]
+        self._pair_to_count_indices[pair][1].remove(pretoken_idx)
+    
+    def recompute_max_count(self):
+        if len(self._pair_to_count_indices) > 0:
+            # scan the entire pairs to find maximum count for now, could use heap to keep track of second largest count
+            self._max_count = max(self._count_to_pair.keys())
+        else:
+            self._max_count = 0
+
+        self._max_count_up_to_date = True
 
 
     def _is_right_greater_pair(self, left: tuple[bytes, bytes], right: tuple[bytes, bytes]) -> bool:
