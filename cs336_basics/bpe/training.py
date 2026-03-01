@@ -14,6 +14,11 @@ class BpeModel:
     that `<token1>` was merged with `<token2>`. The merges should be ordered by order of creation.
     """
 
+    def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]) -> None:
+        self.vocab = vocab
+        self.merges = merges
+        
+
 
 def train_bpe(
     input_path: str,
@@ -40,23 +45,23 @@ def train_bpe(
     pre_tokens = list((list(bytes(t) for t in token), count) for token, count in pre_tokens_counter.items())
 
     # initialize vocab as byte 0 to 255
-    vocabs = [bytes(i) for i in range(256)]
-    vocabs_to_idx = {bytes(i): i for i in range(256)}
-    pairs = PairPositions()
+    vocab = [bytes(i) for i in range(256)]
+    word_to_idx = {bytes(i): i for i in range(256)}
+    pairs_tracker = PairPositions()
 
     for pretoken_idx, (token, count) in enumerate(pre_tokens):
         for i in range(len(token) - 1):
-            pairs.add((token[i], token[i+1]), count, pretoken_idx)
+            pairs_tracker.add((token[i], token[i+1]), count, pretoken_idx)
 
     # merge most common pair in pre_tokens and count again until we have vocab_size
     merges = []
-    while len(vocabs) > vocab_size:
-        (most_common_pair_left, most_common_pair_right), pretoken_idxs = pairs.most_common()
+    while len(vocab) > vocab_size:
+        (most_common_pair_left, most_common_pair_right), pretoken_idxs = pairs_tracker.most_common()
         merged_token = most_common_pair_left + most_common_pair_right
-        vocabs.append(merged_token)
-        vocabs_to_idx[merged_token] = len(vocabs_to_idx)
+        vocab.append(merged_token)
+        word_to_idx[merged_token] = len(word_to_idx)
         merges.append((most_common_pair_left, most_common_pair_right))
-        pairs.delete((most_common_pair_left, most_common_pair_right))
+        pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
         # only look at pretokens where most common pair is in
         # most common pairs after merge must include currently merged token
@@ -69,14 +74,41 @@ def train_bpe(
             while i < len(old_pre_token) - 1:
                 if old_pre_token[i] == most_common_pair_left and old_pre_token[i+1] == most_common_pair_right:
                     new_pre_token.append(merged_token)
-                    # Suppose we have A B C D and B C are merged pair
-                    # we need to add B C
+                    i += 2
                 else:
                     new_pre_token.append(old_pre_token[i])
                     i += 1
 
+            all_pairs: set[tuple[bytes, bytes]] = set()
+            old_pair_counts: Counter[tuple[bytes, bytes]] = Counter()
+            new_pair_counts: Counter[tuple[bytes, bytes]] = Counter()
 
+            for i in range(len(old_pre_token) - 1):
+                pair = (old_pre_token[i], old_pre_token[i+1])
+                all_pairs.add(pair)
+                old_pair_counts[pair] += 1
+            for i in range(len(new_pre_token) - 1):
+                pair = (new_pre_token[i], new_pre_token[i+1])
+                all_pairs.add(pair)
+                new_pair_counts[pair] += 1
+            
+            for pair in all_pairs:
+                delta = new_pair_counts[pair] - old_pair_counts[pair]
+                if delta > 0:
+                    pairs_tracker.add(pair, delta, pretoken_idx)
+                elif delta < 0:
+                    pairs_tracker.decrement(pair, -delta)
+                    if delta == -old_pair_counts[pair]:
+                        pairs_tracker.remove_pretoken_idx_from_pair(pair, pretoken_idx)
         
+    # add special tokens
+    for token in special_tokens:
+        vocab.append(token.encode("utf-8"))
+
+    vocab = {i: token for i, token in enumerate(vocab)}
+    return BpeModel(vocab, merges)
+            
+            
 
 class PairPositions:
     _pair_to_count_indices: dict[tuple[bytes, bytes], tuple[int, set[int]]] # pair to count and pretoken indices
@@ -151,14 +183,15 @@ class PairPositions:
         assert pretoken_idx in self._pair_to_count_indices[pair][1]
         self._pair_to_count_indices[pair][1].remove(pretoken_idx)
     
-    def recompute_max_count(self):
-        if len(self._pair_to_count_indices) > 0:
-            # scan the entire pairs to find maximum count for now, could use heap to keep track of second largest count
-            self._max_count = max(self._count_to_pair.keys())
-        else:
-            self._max_count = 0
+    def recompute_max_count_if_necessary(self):
+        if not self._max_count_up_to_date:
+            if len(self._pair_to_count_indices) > 0:
+                # scan the entire pairs to find maximum count for now, could use heap to keep track of second largest count
+                self._max_count = max(self._count_to_pair.keys())
+            else:
+                self._max_count = 0
 
-        self._max_count_up_to_date = True
+            self._max_count_up_to_date = True
 
 
     def _is_right_greater_pair(self, left: tuple[bytes, bytes], right: tuple[bytes, bytes]) -> bool:
