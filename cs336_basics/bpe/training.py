@@ -48,8 +48,14 @@ def train_bpe(
 
     # merge most common pair in pre_tokens and count again until we have vocab_size
     merges = []
-    while len(pairs) > vocab_size:
-        ...
+    while len(vocabs) > vocab_size:
+        most_common_pair_left, most_common_pair_right = pairs.most_common()
+        new_word = most_common_pair_left + most_common_pair_right
+        vocabs.append(new_word)
+        vocabs_to_idx[new_word] = len(vocabs_to_idx)
+
+
+        
 
 class PairCounter:
     _inner: Counter[tuple[bytes, bytes]]
@@ -126,9 +132,6 @@ class PairCounter:
         # If one virtual concatenation is a prefix of the other,
         # the longer one is lexicographically larger.
         return right_total > left_total
-
-    
-
 
 PRETOKENIZE_PATTERN = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
