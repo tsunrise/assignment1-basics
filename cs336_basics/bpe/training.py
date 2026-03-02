@@ -38,7 +38,7 @@ def train_bpe(
         data = f.read()
 
     # initialize vocab as byte 0 to 255
-    vocab = [bytes(i) for i in range(256)]
+    vocab = [bytes([i]) for i in range(256)]
     for token in special_tokens:
         vocab.append(token.encode("utf-8"))
     word_to_idx = {value: i for (i, value) in enumerate(vocab)}
@@ -57,7 +57,7 @@ def train_bpe(
 
     # merge most common pair in pre_tokens and count again until we have vocab_size
     merges = []
-    while len(vocab) < vocab_size:
+    while len(vocab) < vocab_size and len(pairs_tracker) > 0:
         (most_common_pair_left, most_common_pair_right), pretoken_idxs = pairs_tracker.most_common()
         merged_token = most_common_pair_left + most_common_pair_right
         vocab.append(merged_token)
@@ -100,13 +100,16 @@ def train_bpe(
             for pair in all_pairs:
                 delta = new_pair_counts[pair] - old_pair_counts[pair]
                 if delta > 0:
-                    pairs_tracker.add(pair, delta, pretoken_idx)
+                    pairs_tracker.add(pair, delta * count, pretoken_idx)
                 elif delta < 0:
-                    pairs_tracker.decrement(pair, -delta)
-                    if delta == -old_pair_counts[pair]:
+                    pairs_tracker.decrement(pair, -delta * count)
+                    if delta == -old_pair_counts[pair] and pairs_tracker.count(pair) > 0:
+                        # that means the pair is still in some other pretokens, but no longer in this pretoken. 
+                        # remove this pretoken index from pair for tracking
                         pairs_tracker.remove_pretoken_idx_from_pair(pair, pretoken_idx)
-
-        pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
+        
+        if pairs_tracker.count((most_common_pair_left, most_common_pair_right)) > 0:
+            pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
     vocab = {i: token for i, token in enumerate(vocab)}
     return BpeModel(vocab, merges)
@@ -127,7 +130,7 @@ class PairPositions:
     def __len__(self):
         return len(self._pair_to_count_indices)
 
-    def most_common(self) -> tuple[tuple[bytes, bytes], set[int]]:
+    def most_common(self) -> tuple[tuple[bytes, bytes], list[int]]:
         """
         Return the most common pair and pre-token ids where it's in.
         """
@@ -139,7 +142,7 @@ class PairPositions:
             # lexicographically greater pair wins
             if self._is_right_greater_pair(best_pair, candidate_pair):
                 best_pair = candidate_pair
-        return best_pair, self._pair_to_count_indices[best_pair][1]
+        return best_pair, list(self._pair_to_count_indices[best_pair][1])
 
     def add(self, pair: tuple[bytes, bytes], count: int, pretoken_idx: int):
         assert count > 0
@@ -185,6 +188,12 @@ class PairPositions:
     def remove_pretoken_idx_from_pair(self, pair: tuple[bytes, bytes], pretoken_idx: int):
         assert pretoken_idx in self._pair_to_count_indices[pair][1]
         self._pair_to_count_indices[pair][1].remove(pretoken_idx)
+
+    def count(self, pair: tuple[bytes, bytes]) -> int:
+        result = self._pair_to_count_indices.get(pair)
+        if result is not None:
+            return result[0]
+        return 0
 
     def _recompute_max_count_if_necessary(self):
         if not self._max_count_up_to_date:
