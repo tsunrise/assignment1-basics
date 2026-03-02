@@ -44,7 +44,6 @@ def train_bpe(
     vocab = [bytes([i]) for i in range(256)]
     for token in special_tokens:
         vocab.append(token.encode("utf-8"))
-    word_to_idx = {value: i for (i, value) in enumerate(vocab)}
     pairs_tracker = PairPositions()
 
     # pre-tokenize the data
@@ -74,7 +73,6 @@ def train_bpe(
         (most_common_pair_left, most_common_pair_right), pretoken_idxs = pairs_tracker.most_common()
         merged_token = most_common_pair_left + most_common_pair_right
         vocab.append(merged_token)
-        word_to_idx[merged_token] = len(word_to_idx)
         merges.append((most_common_pair_left, most_common_pair_right))
 
         # only look at pretokens where most common pair is in
