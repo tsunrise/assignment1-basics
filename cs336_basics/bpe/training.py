@@ -1,96 +1,18 @@
 from collections import Counter
-import json
 import os
 from typing import BinaryIO
 import regex as re
 from collections.abc import Generator
 import multiprocessing
-from functools import lru_cache
 
-
-class BpeModel:
-    vocab: dict[int, bytes]
-    """
-    The tokenizer vocabulary, a mapping from int (token ID in the vocabulary) to bytes (token bytes)
-    """
-
-    merges: list[tuple[bytes, bytes]]
-    """
-    A list of BPE merges produced from training. Each list item is a tuple of bytes `(<token1>, <token2>)`, representing
-    that `<token1>` was merged with `<token2>`. The merges should be ordered by order of creation.
-    """
-
-    def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]]) -> None:
-        self.vocab = vocab
-        self.merges = merges
-
-    def save(self, vocab_path: str, merges_path: str) -> None:
-        byte_encoder = gpt2_bytes_to_unicode()
-
-        serialized_vocab: dict[str, int] = {}
-        for idx, token_bytes in sorted(self.vocab.items()):
-            serialized_token = "".join(byte_encoder[b] for b in token_bytes)
-            if serialized_token in serialized_vocab:
-                raise ValueError(f"Duplicate serialized vocab token found: {serialized_token!r}")
-            serialized_vocab[serialized_token] = idx
-
-        with open(vocab_path, "w", encoding="utf-8") as f:
-            json.dump(serialized_vocab, f, ensure_ascii=False, indent=2)
-
-        with open(merges_path, "w", encoding="utf-8") as f:
-            for left, right in self.merges:
-                serialized_left = "".join(byte_encoder[b] for b in left)
-                serialized_right = "".join(byte_encoder[b] for b in right)
-                f.write(f"{serialized_left} {serialized_right}\n")
-
-
-@lru_cache
-def gpt2_bytes_to_unicode() -> dict[int, str]:
-    # GPT-2 byte-to-unicode remapping for serializing byte-level BPE tokens as text.
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(
-        range(ord("®"), ord("ÿ") + 1)
-    )
-    cs = bs[:]
-
-    n = 0
-    for b in range(2**8):
-        if b not in bs:
-            bs.append(b)
-            cs.append(2**8 + n)
-            n += 1
-
-    return dict(zip(bs, [chr(c) for c in cs]))
-
-
-def load_bpe_model(vocab_path: str, merges_path: str) -> BpeModel:
-    byte_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
-
-    with open(vocab_path, encoding="utf-8") as f:
-        serialized_vocab = json.load(f)
-    vocab: dict[int, bytes] = {}
-    for token_str, idx in serialized_vocab.items():
-        vocab[idx] = bytes([byte_decoder[ch] for ch in token_str])
-
-    merges: list[tuple[bytes, bytes]] = []
-    with open(merges_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            left_str, right_str = line.split(" ")
-            left = bytes([byte_decoder[ch] for ch in left_str])
-            right = bytes([byte_decoder[ch] for ch in right_str])
-            merges.append((left, right))
-
-    return BpeModel(vocab=vocab, merges=merges)
-
+from cs336_basics.bpe.tokenizer import BpeTokenizer
 
 def train_bpe(
     input_path: str,
     vocab_size: int,
     special_tokens: list[str],
     num_processes: int = 4,
-) -> BpeModel:
+) -> BpeTokenizer:
     """
     Train a BPE model.
 
@@ -109,6 +31,7 @@ def train_bpe(
     pairs_tracker = PairPositions()
 
     # pre-tokenize the data
+    print("BPE training: making pre-tokens")
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(processes=num_processes) as pool:
         chunk_counters = pool.starmap(
@@ -125,6 +48,7 @@ def train_bpe(
 
     pre_tokens = list((list(bytes([t]) for t in token), count) for token, count in pre_tokens_counter.items())
 
+    print("Merging Pairs")
     for pretoken_idx, (token, count) in enumerate(pre_tokens):
         for i in range(len(token) - 1):
             pairs_tracker.add((token[i], token[i + 1]), count, pretoken_idx)
@@ -185,7 +109,7 @@ def train_bpe(
             pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
     vocab = {i: token for i, token in enumerate(vocab)}
-    return BpeModel(vocab, merges)
+    return BpeTokenizer(vocab, merges, special_tokens)
 
 def pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
     chunk_counter: Counter[bytes] = Counter()
