@@ -1,6 +1,9 @@
 from collections import Counter
+import os
+from typing import BinaryIO
 import regex as re
 from collections.abc import Generator
+import multiprocessing
 
 
 class BpeModel:
@@ -24,6 +27,7 @@ def train_bpe(
     input_path: str,
     vocab_size: int,
     special_tokens: list[str],
+    num_processes: int = 4,
 ) -> BpeModel:
     """
     Train a BPE model.
@@ -33,10 +37,9 @@ def train_bpe(
     - `special_tokens`: A list of strings to add to the vocabulary. These special tokens do not otherwise affect BPE training.
     """
 
-    # read the file as bytes
+    # read the file as bytes and get pre-tokens
     with open(input_path, "rb") as f:
-        data = f.read()
-
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
     # initialize vocab as byte 0 to 255
     vocab = [bytes([i]) for i in range(256)]
     for token in special_tokens:
@@ -45,9 +48,19 @@ def train_bpe(
     pairs_tracker = PairPositions()
 
     # pre-tokenize the data
-    pre_tokens_counter: Counter[bytes] = Counter()
-    for pre_token in pre_tokenize(data, special_tokens):
-        pre_tokens_counter[pre_token] += 1
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=num_processes) as pool:
+        chunk_counters = pool.starmap(
+            pre_tokenize_worker_fn,
+            (
+                (input_path, special_tokens, start_offset, end_offset)
+                for start_offset, end_offset in zip(boundaries[:-1], boundaries[1:])
+            ),
+        )
+    pre_tokens_counter = Counter()
+    for chunk_counter in chunk_counters:
+        for pretoken, count in chunk_counter.items():
+            pre_tokens_counter[pretoken] += count
 
     pre_tokens = list((list(bytes([t]) for t in token), count) for token, count in pre_tokens_counter.items())
 
@@ -104,16 +117,24 @@ def train_bpe(
                 elif delta < 0:
                     pairs_tracker.decrement(pair, -delta * count)
                     if delta == -old_pair_counts[pair] and pairs_tracker.count(pair) > 0:
-                        # that means the pair is still in some other pretokens, but no longer in this pretoken. 
+                        # that means the pair is still in some other pretokens, but no longer in this pretoken.
                         # remove this pretoken index from pair for tracking
                         pairs_tracker.remove_pretoken_idx_from_pair(pair, pretoken_idx)
-        
+
         if pairs_tracker.count((most_common_pair_left, most_common_pair_right)) > 0:
             pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
     vocab = {i: token for i, token in enumerate(vocab)}
     return BpeModel(vocab, merges)
 
+def pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
+    chunk_counter: Counter[bytes] = Counter()
+    with open(input_path, "rb") as f:
+        f.seek(start_offset)
+        chunk = f.read(end_offset - start_offset)
+        for pre_token in pre_tokenize(chunk, special_tokens):
+            chunk_counter[pre_token] += 1
+    return chunk_counter
 
 class PairPositions:
     _pair_to_count_indices: dict[tuple[bytes, bytes], tuple[int, set[int]]]  # pair to count and pretoken indices
@@ -140,7 +161,7 @@ class PairPositions:
         best_pair = next(candidate_pairs)
         for candidate_pair in candidate_pairs:
             # lexicographically greater pair wins
-            if self._is_right_greater_pair(best_pair, candidate_pair):
+            if candidate_pair > best_pair:
                 best_pair = candidate_pair
         return best_pair, list(self._pair_to_count_indices[best_pair][1])
 
@@ -205,31 +226,9 @@ class PairPositions:
 
             self._max_count_up_to_date = True
 
-    def _is_right_greater_pair(self, left: tuple[bytes, bytes], right: tuple[bytes, bytes]) -> bool:
-        """ """
-        left0, left1 = left
-        right0, right1 = right
-
-        i = 0
-        left_total = len(left0) + len(left1)
-        right_total = len(right0) + len(right1)
-        min_total = min(left_total, right_total)
-
-        # Compare (left0 + left1) vs (right0 + right1) byte by byte
-        # without allocating concatenated bytestrings.
-        while i < min_total:
-            lb = left0[i] if i < len(left0) else left1[i - len(left0)]
-            rb = right0[i] if i < len(right0) else right1[i - len(right0)]
-            if lb != rb:
-                return rb > lb
-            i += 1
-
-        # If one virtual concatenation is a prefix of the other,
-        # the longer one is lexicographically larger.
-        return right_total > left_total
-
 
 PRETOKENIZE_PATTERN = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+
 
 def pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
     """
@@ -237,26 +236,74 @@ def pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
     Pre-tokens do not include special tokens.
     """
 
-    text = input.decode("utf-8")
-    def split_on_special_tokens(text: str) -> Generator[str]: 
+    text = input.decode("utf-8", errors="ignore")
+
+    def split_on_special_tokens(text: str) -> Generator[str]:
         """
         Return a generator text items splitted by special tokens. Those text items do not include special items themselves.
         """
         if len(special_tokens) == 0:
             yield text
             return
-        
+
         special_token_escaped_patterns = [re.escape(t) for t in sorted(set(special_tokens), key=len, reverse=True)]
         special_token_pat = re.compile("|".join(special_token_escaped_patterns))
 
-        window_start = 0 # start of a potential non-specialized-token split item
+        window_start = 0  # start of a potential non-specialized-token split item
         for m in special_token_pat.finditer(text):
             if m.start() > window_start:
-                yield text[window_start:m.start()]
+                yield text[window_start : m.start()]
             window_start = m.end()
         if window_start < len(text):
             yield text[window_start:]
-        
+
     for item in split_on_special_tokens(text):
         for m in PRETOKENIZE_PATTERN.finditer(item):
             yield m.group(0).encode("utf-8")
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
