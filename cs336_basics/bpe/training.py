@@ -6,6 +6,7 @@ from collections.abc import Generator
 import multiprocessing
 
 from cs336_basics.bpe.tokenizer import BpeTokenizer
+from cs336_basics.bpe.utils import compile_special_token_patterns, split_on_special_tokens
 
 def train_bpe(
     input_path: str,
@@ -35,7 +36,7 @@ def train_bpe(
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(processes=num_processes) as pool:
         chunk_counters = pool.starmap(
-            pre_tokenize_worker_fn,
+            _pre_tokenize_worker_fn,
             (
                 (input_path, special_tokens, start_offset, end_offset)
                 for start_offset, end_offset in zip(boundaries[:-1], boundaries[1:])
@@ -111,12 +112,12 @@ def train_bpe(
     vocab = {i: token for i, token in enumerate(vocab)}
     return BpeTokenizer(vocab, merges, special_tokens)
 
-def pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
+def _pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
     chunk_counter: Counter[bytes] = Counter()
     with open(input_path, "rb") as f:
         f.seek(start_offset)
         chunk = f.read(end_offset - start_offset)
-        for pre_token in pre_tokenize(chunk, special_tokens):
+        for pre_token in _pre_tokenize(chunk, special_tokens):
             chunk_counter[pre_token] += 1
     return chunk_counter
 
@@ -214,7 +215,7 @@ class PairPositions:
 PRETOKENIZE_PATTERN = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
 
-def pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
+def _pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
     """
     Split the input bytes into pre-tokens, each represented as a sequence of UTF-8 bytes.
     Pre-tokens do not include special tokens.
@@ -222,27 +223,10 @@ def pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
 
     text = input.decode("utf-8", errors="ignore")
 
-    def split_on_special_tokens(text: str) -> Generator[str]:
-        """
-        Return a generator text items splitted by special tokens. Those text items do not include special items themselves.
-        """
-        if len(special_tokens) == 0:
-            yield text
-            return
-
-        special_token_escaped_patterns = [re.escape(t) for t in sorted(set(special_tokens), key=len, reverse=True)]
-        special_token_pat = re.compile("|".join(special_token_escaped_patterns))
-
-        window_start = 0  # start of a potential non-specialized-token split item
-        for m in special_token_pat.finditer(text):
-            if m.start() > window_start:
-                yield text[window_start : m.start()]
-            window_start = m.end()
-        if window_start < len(text):
-            yield text[window_start:]
-
-    for item in split_on_special_tokens(text):
-        for m in PRETOKENIZE_PATTERN.finditer(item):
+    for lo, hi, is_special in split_on_special_tokens(text, special_tokens):
+        if is_special: 
+            continue
+        for m in PRETOKENIZE_PATTERN.finditer(text[lo:hi]):
             yield m.group(0).encode("utf-8")
 
 
