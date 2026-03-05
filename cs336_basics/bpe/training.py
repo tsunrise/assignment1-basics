@@ -1,19 +1,17 @@
 from collections import Counter
 import os
 from typing import BinaryIO
-import regex as re
 from collections.abc import Generator
 import multiprocessing
 
-from cs336_basics.bpe.tokenizer import BpeTokenizer
-from cs336_basics.bpe.utils import compile_special_token_patterns, split_on_special_tokens
+from cs336_basics.bpe.utils import BpeParameters, compile_special_token_patterns_binary, split_into_pretokens
 
 def train_bpe(
     input_path: str,
     vocab_size: int,
     special_tokens: list[str],
     num_processes: int = 4,
-) -> BpeTokenizer:
+) -> BpeParameters:
     """
     Train a BPE model.
 
@@ -24,7 +22,7 @@ def train_bpe(
 
     # read the file as bytes and get pre-tokens
     with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+        boundaries = find_chunk_boundaries(f, num_processes, special_tokens)
     # initialize vocab as byte 0 to 255
     vocab = [bytes([i]) for i in range(256)]
     for token in special_tokens:
@@ -110,7 +108,7 @@ def train_bpe(
             pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
     vocab = {i: token for i, token in enumerate(vocab)}
-    return BpeTokenizer(vocab, merges, special_tokens)
+    return BpeParameters(vocab, merges)
 
 def _pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
     chunk_counter: Counter[bytes] = Counter()
@@ -212,9 +210,6 @@ class PairPositions:
             self._max_count_up_to_date = True
 
 
-PRETOKENIZE_PATTERN = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-
-
 def _pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
     """
     Split the input bytes into pre-tokens, each represented as a sequence of UTF-8 bytes.
@@ -223,23 +218,21 @@ def _pre_tokenize(input: bytes, special_tokens: list[str]) -> Generator[bytes]:
 
     text = input.decode("utf-8", errors="ignore")
 
-    for lo, hi, is_special in split_on_special_tokens(text, special_tokens):
+    for lo, hi, is_special in split_into_pretokens(text, special_tokens):
         if is_special: 
             continue
-        for m in PRETOKENIZE_PATTERN.finditer(text[lo:hi]):
-            yield m.group(0).encode("utf-8")
+        yield text[lo:hi].encode("utf-8")
 
 
 def find_chunk_boundaries(
     file: BinaryIO,
     desired_num_chunks: int,
-    split_special_token: bytes,
+    special_tokens: list[str],
 ) -> list[int]:
     """
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
 
     # Get total file size in bytes
     file.seek(0, os.SEEK_END)
@@ -254,6 +247,7 @@ def find_chunk_boundaries(
     chunk_boundaries[-1] = file_size
 
     mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+    split_pattern = compile_special_token_patterns_binary(special_tokens)
 
     for bi in range(1, len(chunk_boundaries) - 1):
         initial_position = chunk_boundaries[bi]
@@ -267,9 +261,10 @@ def find_chunk_boundaries(
                 break
 
             # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
-            if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
+            results = split_pattern.finditer(mini_chunk)
+            m = next(results, None) 
+            if m is not None:
+                chunk_boundaries[bi] = initial_position + m.start()
                 break
             initial_position += mini_chunk_size
 
