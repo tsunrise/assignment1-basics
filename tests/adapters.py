@@ -12,7 +12,8 @@ from torch import Tensor
 from cs336_basics.bpe.tokenizer import BpeTokenizer
 from cs336_basics.modules.linear import Linear
 from cs336_basics.modules.emb import Embedding
-
+from cs336_basics.modules.rmsnorm import RmsNorm
+from cs336_basics.modules.swiglu import SwiGLU
 def run_linear(
     d_in: int,
     d_out: int,
@@ -94,7 +95,13 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    ff = SwiGLU(d_model, d_ff)
+    with torch.no_grad():
+        ff.w1.copy_(w1_weight)
+        ff.w2.copy_(w2_weight)
+        ff.w3.copy_(w3_weight)
+    
+    return ff(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -311,7 +318,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $\\Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -389,7 +396,10 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm = RmsNorm(d_model, eps)
+    with torch.no_grad():
+        rmsnorm.g.copy_(weights)
+    return rmsnorm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

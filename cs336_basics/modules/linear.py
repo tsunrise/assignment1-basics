@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-
+from cs336_basics.modules.util import initialized_linear_weights
 
 class Linear(nn.Module):
     """
@@ -12,8 +12,7 @@ class Linear(nn.Module):
         self, in_features: int, out_features: int, device: torch.device | None = None, dtype: torch.dtype | None = None
     ) -> None:
         super().__init__()
-        std=2/(in_features + out_features)
-        self.w = nn.Parameter(nn.init.trunc_normal_(torch.empty(out_features, in_features), mean=0, std=std, a = -3*std, b = 3 * std))
+        self.w = nn.Parameter(initialized_linear_weights(in_features, out_features, dtype=dtype, device=device))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (...batch, in_features) , (out_features, in_features) -> (...batch, out_features)
