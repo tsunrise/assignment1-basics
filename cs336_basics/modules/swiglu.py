@@ -12,7 +12,8 @@ class SwiGLU(nn.Module):
         if d_ff is None:
             d_ff = round((8/3) * d_model)
             # increase to the next 64 multiples
-            d_ff = d_ff + 64 - (d_ff // 64)
+            if d_ff % 64 != 0:
+                d_ff = d_ff + 64 - (d_ff % 64)
 
         # w1 w3 project d_model to d_ff
         self.w1 = nn.Parameter(initialized_linear_weights(d_model, d_ff, dtype=dtype, device=device)) # (d_ff, d_model)
