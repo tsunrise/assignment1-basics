@@ -9,6 +9,7 @@ class SwiGLU(nn.Module):
         SiLU(x) = x\dot\sigmoid(x)
         SwiGLU = W_2(SiLU(W_1x) * W_3x)
         """
+        
         if d_ff is None:
             d_ff = round((8/3) * d_model)
             # increase to the next 64 multiples
