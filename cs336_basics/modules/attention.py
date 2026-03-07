@@ -17,7 +17,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     assert K.shape[:-1] == V.shape[:-1]
     raw_score: torch.Tensor = (torch.einsum('...qd,...kd->...qk', Q, K)) / d_k**0.5 # (...batch, queries, keys)
     if mask is not None:
-        raw_score[~mask] = torch.tensor(float("-inf"), dtype=raw_score.dtype)
+        raw_score = raw_score.masked_fill(~mask, float('-inf'))
 
     scores = softmax(raw_score, -1)
 
