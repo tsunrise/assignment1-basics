@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from typing import IO, Any, BinaryIO
+from typing import IO, Any, BinaryIO, cast
 
 import numpy.typing as npt
 import torch
@@ -17,7 +17,7 @@ from cs336_basics.modules.swiglu import SwiGLU
 from cs336_basics.modules.rope import RoPE
 from cs336_basics.modules.softmax import softmax
 from cs336_basics.modules.attention import scaled_dot_product_attention, MultiHeadSelfAttention
-from cs336_basics.modules.transformer import TransformerBlock
+from cs336_basics.modules.transformer import TransformerBlock, TransformerLM
 def run_linear(
     d_in: int,
     d_out: int,
@@ -403,7 +403,33 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    lm = TransformerLM(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+    )
+    with torch.no_grad():
+        lm.emb.x.copy_(weights["token_embeddings.weight"])
+        for layer_idx, block in enumerate(lm.blocks):
+            prefix = f"layers.{layer_idx}"
+            block = cast(TransformerBlock, block)
+            block.attn.WQ.copy_(weights[f"{prefix}.attn.q_proj.weight"])
+            block.attn.WK.copy_(weights[f"{prefix}.attn.k_proj.weight"])
+            block.attn.WV.copy_(weights[f"{prefix}.attn.v_proj.weight"])
+            block.attn.WO.copy_(weights[f"{prefix}.attn.output_proj.weight"])
+            block.ln1.g.copy_(weights[f"{prefix}.ln1.weight"])
+            block.ff.w1.copy_(weights[f"{prefix}.ffn.w1.weight"])
+            block.ff.w2.copy_(weights[f"{prefix}.ffn.w2.weight"])
+            block.ff.w3.copy_(weights[f"{prefix}.ffn.w3.weight"])
+            block.ln2.g.copy_(weights[f"{prefix}.ln2.weight"])
+        lm.final_ln.g.copy_(weights["ln_final.weight"])
+        lm.final_linear.w.copy_(weights["lm_head.weight"])
+
+    return lm(in_indices)
 
 
 def run_rmsnorm(

@@ -20,14 +20,15 @@ class TransformerBlock(nn.Module):
         self.ln2 = RmsNorm(d_model)
         self.ff = SwiGLU(d_model, d_ff)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         """
         - `x`: (...batch, tokens, d_model)
+        - `token_positions`: (...batch, tokens)
         - return: (...batch, tokens, d_model)
         """
 
         x1 = self.ln1(x)
-        x1 = self.attn.forward(x1)
+        x1 = self.attn(x1,token_positions)
         x = x + x1
 
         x1 = self.ln2(x)
@@ -47,24 +48,25 @@ class TransformerLM(nn.Module):
         - `context_length`: maximum sequence length, useful for determining the position embedding matrix
         - `num_layers`: number of transform blocks to use
         """
+        super().__init__()
         rope = RoPE(rope_theta, d_model // num_heads, context_length)
 
         self.emb = Embedding(vocab_size, d_model)
-        self.blocks = [TransformerBlock(d_model, num_heads, d_ff, rope) for _ in range(num_layers)]
+        self.blocks= nn.ModuleList(TransformerBlock(d_model, num_heads, d_ff, rope) for _ in range(num_layers))
         self.final_ln = RmsNorm(d_model)
-        self.final_linear = Linear(d_model, d_model)
+        self.final_linear = Linear(d_model, vocab_size)
 
-    def forward(self, token_ids: torch.Tensor):
+    def forward(self, token_ids: torch.Tensor, token_positions: torch.Tensor | None = None):
         """
         - `token_ids`: (...batch, tokens) int token id
-        - return: (...batch, tokens, d_model) probability of word at token
+        - `token_positions`: (...batch, tokens) int
+        - return: (...batch, tokens, vocab_size) logits of next word at token
         """
-        x = self.emb.forward(token_ids)
+        x = self.emb(token_ids)
         for tf in self.blocks:
-            x = tf(x)
+            x = tf(x, token_positions)
         x = self.final_ln(x)
         x = self.final_linear(x)
-        x = softmax(x, -1)
         return x
 
 
