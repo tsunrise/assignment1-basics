@@ -36,7 +36,7 @@ class MultiHeadSelfAttention(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
-        assert d_model > num_heads
+        assert d_model >= num_heads
         assert d_model % num_heads == 0
         self.d_k = d_model // num_heads
         self.d_v = self.d_k
@@ -53,6 +53,7 @@ class MultiHeadSelfAttention(nn.Module):
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         """
         `x`: (...batch, tokens, d_model)
+        `token_positions`: (...batch, tokens)
         return: (...batch, tokens, d_model)
         """
 
@@ -62,6 +63,8 @@ class MultiHeadSelfAttention(nn.Module):
         Q = Q_flat.reshape(*Q_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3) # (...batch, h, tokens, d_k)
         K_flat = x @ self.WK.T
         K = K_flat.reshape(*K_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3) # (...batch, h, tokens, d_k)
+        if token_positions is not None:
+            token_positions = token_positions.unsqueeze(-3) # (...batch, 1, tokens)
         if self.rope:
             Q = self.rope(Q, token_positions)
             K = self.rope(K, token_positions) # shape unchanged
@@ -69,7 +72,7 @@ class MultiHeadSelfAttention(nn.Module):
         V = V_flat.reshape(*V_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3) # (...batch, h, tokens, d_k)
 
         # mask[i][j] = True iff j <= i
-        mask = torch.tril(torch.ones((tokens, tokens), dtype=torch.bool)) # (tokens, tokens)
+        mask = torch.tril(torch.ones((tokens, tokens), dtype=torch.bool, device=x.device)) # (tokens, tokens)
         out = scaled_dot_product_attention(Q, K, V, mask) # (...batch, h, tokens, d_k)
         out_flat = out.transpose(-2,-3).flatten(-2, -1) # (...batch, tokens, d_model)
         return out_flat @ self.WO.T # (...batch, tokens, d_model)

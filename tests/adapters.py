@@ -17,6 +17,7 @@ from cs336_basics.modules.swiglu import SwiGLU
 from cs336_basics.modules.rope import RoPE
 from cs336_basics.modules.softmax import softmax
 from cs336_basics.modules.attention import scaled_dot_product_attention, MultiHeadSelfAttention
+from cs336_basics.modules.transformer import TransformerBlock
 def run_linear(
     d_in: int,
     d_out: int,
@@ -308,7 +309,19 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    rope = RoPE(theta, d_model // num_heads, max_seq_len)
+    tf = TransformerBlock(d_model, num_heads, d_ff, rope)
+    with torch.no_grad():
+        tf.attn.WQ.copy_(weights["attn.q_proj.weight"])
+        tf.attn.WK.copy_(weights["attn.k_proj.weight"])
+        tf.attn.WV.copy_(weights["attn.v_proj.weight"])
+        tf.attn.WO.copy_(weights["attn.output_proj.weight"])
+        tf.ln1.g.copy_(weights["ln1.weight"])
+        tf.ff.w1.copy_(weights["ffn.w1.weight"])
+        tf.ff.w2.copy_(weights["ffn.w2.weight"])
+        tf.ff.w3.copy_(weights["ffn.w3.weight"])
+        tf.ln2.g.copy_(weights["ln2.weight"])
+    return tf(in_features)
 
 
 def run_transformer_lm(

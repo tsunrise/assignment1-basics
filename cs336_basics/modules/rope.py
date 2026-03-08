@@ -33,9 +33,9 @@ class RoPE(nn.Module):
         """
         # angle rotated for each pair
         if token_positions is not None:
-            angles = self.get_buffer('angle')[token_positions].to(x.dtype) # (...batch, seq_len, d_k // 2)
+            angles = self.get_buffer('angle')[token_positions].to(device=x.device, dtype=x.dtype) # (...batch, seq_len, d_k // 2)
         else:
-            angles = self.get_buffer('angle')[:x.shape[-2]].to(x.dtype) # (seq_len, d_k // 2)
+            angles = self.get_buffer('angle')[:x.shape[-2]].to(device=x.device, dtype=x.dtype) # (seq_len, d_k // 2)
         cos = torch.cos(angles)
         sin = torch.sin(angles)
 
