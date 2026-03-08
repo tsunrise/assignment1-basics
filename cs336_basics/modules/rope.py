@@ -24,7 +24,7 @@ class RoPE(nn.Module):
         self.register_buffer('angle', angle, persistent=False)
         self.d_k = d_k
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         r"""
         - `x`: (...batch, seq_len, d_k)
         - `token_positions`: (...batch, seq_len)
@@ -32,7 +32,10 @@ class RoPE(nn.Module):
         - return: (...batch, seq_len, d_k)
         """
         # angle rotated for each pair
-        angles = self.get_buffer('angle')[token_positions].to(x.dtype) # (...batch, seq_len, d_k // 2)
+        if token_positions is not None:
+            angles = self.get_buffer('angle')[token_positions].to(x.dtype) # (...batch, seq_len, d_k // 2)
+        else:
+            angles = self.get_buffer('angle')[:x.shape[-2]].to(x.dtype) # (seq_len, d_k // 2)
         cos = torch.cos(angles)
         sin = torch.sin(angles)
 
