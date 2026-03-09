@@ -1,6 +1,6 @@
 import torch
 
-def log_sum_exp(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+def log_sum_exp(x: torch.Tensor) -> torch.Tensor:
     r"""
     - `x`: (...batch, D)
     - return: (...batch) \log(\sum_{i=D} exp(x[i]))
@@ -8,9 +8,9 @@ def log_sum_exp(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     # \log(\sum_{i=D} exp(x[i])) = \log(exp(max(x))\sum_{i in D} exp(x[i]-max(x)))
     #                            = max(x) + \log(\sum_{i in D} exp(x[i]-max(x)))
     # for numerical stability.
-    x_max = torch.max(x, dim=dim).values # (...batch)
+    x_max = torch.max(x, dim=-1).values # (...batch)
     left = x_max
-    right = torch.log(torch.sum(torch.exp(x-x_max.unsqueeze(-1)), dim=dim))
+    right = torch.log(torch.sum(torch.exp(x-x_max.unsqueeze(-1)),dim=-1))
     return left + right
 
 def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -25,7 +25,7 @@ def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
     # for each batch item
     left = -torch.gather(logits, -1, targets.unsqueeze(-1)).reshape_as(targets)
-    right = log_sum_exp(logits, -1) # (...batch)
+    right = log_sum_exp(logits) # (...batch)
     assert left.shape == right.shape
     return torch.mean(left + right)
 
