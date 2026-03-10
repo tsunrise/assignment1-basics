@@ -5,6 +5,18 @@ import torch
 
 
 class AdamW(torch.optim.Optimizer):
+    """
+    Memory Usage: Roughly 2 params required for each param.
+    For model with (vocab_size, context_length, num_layers, d_models, num_heads)
+
+    M(AdamW) "Memory of AdamW"
+    = 2 * (M(Emb) + num_layers * (M(WQ, WK, WV, WO) + M(ff) + 2*M(RMSNorm)) + M(RMSNorm) + M(Final Linear))
+    = 2 * (vocab_size * d_models + num_layers * (4 * d_model**2 + 3 * d_model * d_ff + 2 * d_model) + d_model + d_models * vocab_size)
+
+    Memory usage does not depend on batch size. 
+
+    Flops: Roughly O(P), around 10-20flops
+    """
     def __init__(self, params, lr: float, weight_decay: float, betas: tuple[float, float], eps: float):
         if lr < 0:
             raise ValueError("Invalid learning rate: {lr}")
