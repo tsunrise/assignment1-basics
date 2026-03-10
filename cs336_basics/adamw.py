@@ -35,7 +35,7 @@ class AdamW(torch.optim.Optimizer):
                 p: torch.Tensor
                 if p.grad is None:
                     continue
-                grad = p.grad.data
+                grad = p.grad
 
                 state: dict[str, Any] = self.state[p]
 
