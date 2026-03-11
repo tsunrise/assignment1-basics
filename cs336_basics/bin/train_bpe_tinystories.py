@@ -1,6 +1,7 @@
 from cs336_basics.bpe.training import train_bpe
+from cs336_basics.bpe.tokenizer import BpeTokenizer
 from pathlib import Path
-
+import os
 
 def main():
     repo_root = Path(__file__).resolve().parents[2]
@@ -14,6 +15,12 @@ def main():
     )
     print(f"vocab size: {len(model.vocab)}")
     print(f"num merges: {len(model.merges)}")
+
+    tokenizer = BpeTokenizer.from_bpe_parameters(model)
+    directory = "artifacts/bpe/tinystories"
+    os.makedirs(directory, exist_ok=True)
+    tokenizer.to_files(directory + "/vocab.json", directory + "/merges.txt")
+    print(f"Saved to {directory}")
 
 if __name__ == "__main__":
     main()

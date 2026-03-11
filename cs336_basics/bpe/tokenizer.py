@@ -52,7 +52,7 @@ class BpeTokenizer:
         gpt2_encoder = gpt2_bytes_to_unicode()
         with open(merges_filepath, mode="w", encoding="utf-8") as f:
             f.writelines(
-                " ".join("".join(gpt2_encoder[b] for b in x) for x in (left, right)) for (left, right) in self.merges
+                " ".join("".join(gpt2_encoder[b] for b in x) for x in (left, right)) + "\n" for (left, right) in self.merges
             )
 
     def encode(self, text: str) -> list[int]:
