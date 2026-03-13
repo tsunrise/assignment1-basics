@@ -108,7 +108,7 @@ def train_bpe(
             pairs_tracker.delete((most_common_pair_left, most_common_pair_right))
 
     vocab = {i: token for i, token in enumerate(vocab)}
-    return BpeParameters(vocab, merges)
+    return BpeParameters(vocab, merges, special_tokens)
 
 def _pre_tokenize_worker_fn(input_path: str, special_tokens: list[str], start_offset: int, end_offset: int):
     chunk_counter: Counter[bytes] = Counter()

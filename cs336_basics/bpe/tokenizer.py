@@ -11,7 +11,7 @@ import json
 
 class BpeTokenizer:
     def __init__(
-        self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
+        self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str]
     ):
         self.vocab = vocab
         self.merges = merges
@@ -25,15 +25,15 @@ class BpeTokenizer:
 
     @classmethod
     def from_bpe_parameters(cls, params: BpeParameters):
-        return cls(params.vocab, params.merges)
+        return cls(params.vocab, params.merges, params.special_tokens)
 
     @classmethod
-    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
-        # decode vocab from json
-        with open(vocab_filepath, mode="r", encoding="utf-8") as f:
-            vocab_inv: dict[bytes, int] = json.load(f)
-            vocab = {i: b for b, i in vocab_inv.items()}
+    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str]):
         gpt2_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
+        # decode vocab from json
+        with open(vocab_filepath, encoding="utf-8") as f:
+            vocab_inv: dict[str, int] = json.load(f)
+            vocab = {i: bytes(gpt2_decoder[t] for t in vocab_encoded) for vocab_encoded, i in vocab_inv.items()}
         with open(merges_filepath, encoding="utf-8") as f:
             merges = [tuple(line.rstrip().split(" ")) for line in f]
             merges = [
@@ -44,12 +44,12 @@ class BpeTokenizer:
         return cls(vocab, merges, special_tokens)
 
     def to_files(self, vocab_filepath: str, merges_filepath: str):
+        gpt2_encoder = gpt2_bytes_to_unicode()
         # encode vocab to json
-        vocabs_ser = {b.hex(): i for (i, b) in self.vocab.items()}
+        vocabs_ser = {"".join(gpt2_encoder[b] for b in vocab_bytes): i for (i, vocab_bytes) in self.vocab.items()}
         with open(vocab_filepath, mode="w", encoding="utf-8") as f:
             json.dump(vocabs_ser, f)
         # each merge is a line with gpt2_encoding(left_bytes) gpt2_encoding(right_bytes)
-        gpt2_encoder = gpt2_bytes_to_unicode()
         with open(merges_filepath, mode="w", encoding="utf-8") as f:
             f.writelines(
                 " ".join("".join(gpt2_encoder[b] for b in x) for x in (left, right)) + "\n" for (left, right) in self.merges
@@ -121,7 +121,6 @@ class BpeTokenizer:
     def encode_iterable(self, iterable: Iterable[str]) -> Generator[int]:
         special_token_patterns = compile_special_token_patterns(self.special_tokens)
         buf = deque()
-        buf_release_threshold = 4 * 4096 * 4096  # when buffer size >= this threshold,
         # release the buffer before the beginning of next special token
         # that does not overlap on two string
         # TODO: we could randomize this threshold to prevent malicious dataset putting all special token
@@ -129,12 +128,6 @@ class BpeTokenizer:
         stream = iter(iterable)
         while True:
             nxt = None
-            # accumulate buffer until reaching release threshold
-            while len(buf) < buf_release_threshold:
-                nxt = next(stream, None)
-                if nxt is None:
-                    break
-                buf.append(nxt)
 
             # continue accumulate buffer until we see a special token that does not overlap in boundaries
             # TODO: we could further optimize this so that it accumulate until we see a special token that may overlap in boundaries
@@ -144,11 +137,13 @@ class BpeTokenizer:
                     break
                 m = next(special_token_patterns.finditer(nxt), None)
                 if m is not None:
-                    buf.append(nxt[:m])
+                    buf.append(nxt[:m.start()])
                     # release buffer
                     yield from self.encode_chunk("".join(buf))
                     buf.clear()
-                    buf.append(nxt[m:])
+                    buf.append(nxt[m.start():])
+                else:
+                    buf.append(nxt)
 
             if nxt is None:
                 break

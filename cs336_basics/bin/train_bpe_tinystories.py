@@ -3,6 +3,9 @@ from cs336_basics.bpe.tokenizer import BpeTokenizer
 from pathlib import Path
 import os
 
+TRAIN_TOKENS_PATH = "artifacts/bpe/tinystories/traindata_tokens.npy"
+VAL_TOKENS_PATH = "artifacts/bpe/tinystories/valdata_tokens.npy"
+
 def main():
     repo_root = Path(__file__).resolve().parents[2]
     input_path = repo_root / "data" / "TinyStoriesV2-GPT4-train.txt"

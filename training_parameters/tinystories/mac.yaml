@@ -1,0 +1,17 @@
+parameters:
+  d_model: 512
+  num_layers: 4
+  num_heads: 16
+  d_ff: 1344
+  rope_theta: 10000
+  context_length: 256
+  batch_size: 32
+  total_steps: 5000
+  val_interval: 10
+  checkpoint_save_intervals: 50
+  lr: 1e-3
+  beta1: 0.99
+  beta2: 0.999
+  eps: 1e-8
+  weight_decay: 0.01
+  device: mps

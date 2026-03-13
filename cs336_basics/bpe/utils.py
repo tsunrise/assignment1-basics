@@ -45,6 +45,7 @@ def _get_pretokens_from_text_without_specialized_tokens(text: str, starting_offs
 class BpeParameters:
     vocab: dict[int, bytes]
     merges: list[tuple[bytes, bytes]]
+    special_tokens: list[str]
 
 @lru_cache
 def gpt2_bytes_to_unicode() -> dict[int, str]:
