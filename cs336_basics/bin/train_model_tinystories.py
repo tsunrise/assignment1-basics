@@ -2,12 +2,13 @@ import wandb
 from cs336_basics.bpe.tokenizer import BpeTokenizer
 from cs336_basics.modules.transformer import TransformerLM
 from cs336_basics.adamw import AdamW
-import yaml
+import toml
 from cs336_basics.training import load_checkpoint, get_batch, save_checkpoint
 from cs336_basics.cross_entropy import cross_entropy
 import numpy as np
 import os
 import torch
+
 
 TRAIN_PATH = "data/TinyStoriesV2-GPT4-train.txt"
 VAL_PATH = "data/TinyStoriesV2-GPT4-valid.txt"
@@ -30,7 +31,7 @@ def main(plan_path: str):
     """
 
     with open(plan_path) as f:
-        config = yaml.safe_load(f)["parameters"]
+        config = toml.load(f)["parameters"]
 
     wdb = wandb.init(
         entity="tomshen",
@@ -93,3 +94,14 @@ def main(plan_path: str):
         if step % config["checkpoint_save_intervals"] == 0:
             os.makedirs(CHECKPOINT_DIR_PATH, exist_ok=True)
             save_checkpoint(model, optimizer, step, CHECKPOINT_PATH)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config_file", help="Path to YAML config file")
+    args = parser.parse_args()
+
+    plan_path: str = args.config_file
+    main(plan_path)
