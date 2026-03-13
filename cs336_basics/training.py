@@ -16,8 +16,8 @@ def get_batch(dataset: np.ndarray, batch_size: int, context_length: int, device:
     assert dataset.shape[0] >= context_length + 1 # minimum length need for a training batch
     # sample random starting indices
     training_starts = np.random.randint(0, dataset.shape[0] - context_length, batch_size)
-    input_tokens = torch.tensor(np.array([dataset[training_starts[i]:training_starts[i] + context_length] for i in range(batch_size)])).to(device=device) # (batch_size, context_length)
-    target_tokens = torch.tensor(np.array([dataset[training_starts[i]+1:training_starts[i] + context_length+1] for i in range(batch_size)])).to(device=device) # (batch_size, context_length)
+    input_tokens = torch.from_numpy(np.array([dataset[training_starts[i]:training_starts[i] + context_length] for i in range(batch_size)], dtype=np.int64)).to(device=device) # (batch_size, context_length)
+    target_tokens = torch.from_numpy(np.array([dataset[training_starts[i]+1:training_starts[i] + context_length+1] for i in range(batch_size)], dtype=np.int64)).to(device=device) # (batch_size, context_length)
     return input_tokens, target_tokens
 
 FILE_LIKE: TypeAlias = str | os.PathLike | BinaryIO | IO[bytes]

@@ -1,3 +1,5 @@
+from typing import cast
+
 import wandb
 from cs336_basics.bpe.tokenizer import BpeTokenizer
 from cs336_basics.modules.transformer import TransformerLM
@@ -8,6 +10,7 @@ from cs336_basics.cross_entropy import cross_entropy
 import numpy as np
 import os
 import torch
+from tqdm import tqdm
 
 
 TRAIN_PATH = "data/TinyStoriesV2-GPT4-train.txt"
@@ -52,6 +55,10 @@ def main(plan_path: str):
         context_length=config["context_length"],
         num_layers=config["num_layers"],
     ).to(config["device"])
+    if config["device"] == "mps":
+        model = cast(torch.nn.Module, torch.compile(model, backend="aot_eager"))
+    else:
+        model = cast(torch.nn.Module, torch.compile(model))
     optimizer = AdamW(
         model.parameters(), config["lr"], config["weight_decay"], (config["beta1"], config["beta2"]), config["eps"]
     )
@@ -63,6 +70,8 @@ def main(plan_path: str):
     # load training and validation data
     data_train = load_token_data(TRAIN_TOKENS_PATH)
     data_val = load_token_data(VAL_TOKENS_PATH)
+
+    tq = tqdm(total=config["total_steps"], initial=step)
 
     while step < config["total_steps"]:
         train_input, train_target = get_batch(
@@ -90,6 +99,7 @@ def main(plan_path: str):
 
         wdb.log({"train_loss": train_loss.item()}, step=step, commit=True)
         step += 1
+        tq.update(1)
 
         if step % config["checkpoint_save_intervals"] == 0:
             os.makedirs(CHECKPOINT_DIR_PATH, exist_ok=True)
@@ -100,7 +110,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("config_file", help="Path to YAML config file")
+    parser.add_argument("config_file", help="Path to TOML config file")
     args = parser.parse_args()
 
     plan_path: str = args.config_file
