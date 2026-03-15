@@ -22,6 +22,7 @@ def scaled_dot_product_attention(
     d_k = Q.shape[-1]
     assert Q.shape[-1] == K.shape[-1]
     assert K.shape[:-1] == V.shape[:-1]
+    assert K.shape[:-2] == V.shape[:-2]
     raw_score: torch.Tensor = (torch.einsum("...qd,...kd->...qk", Q, K)) / d_k**0.5  # (...batch, queries, keys)
     if mask is not None:
         raw_score = raw_score.masked_fill(~mask, float("-inf"))
@@ -108,7 +109,19 @@ class MultiHeadSelfAttention(nn.Module):
         """
         `x`: (...batch, tokens, d_model)
         `token_positions`: (...batch, tokens)
-        return: (...batch, tokens, d_model)
+        return:
+            - result: (...batch, tokens, d_model)
+        """
+        return self.forward_returning_kv(x, token_positions)[0]
+
+    def forward_returning_kv(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
+        """
+        `x`: (...batch, tokens, d_model)
+        `token_positions`: (...batch, tokens)
+        return:
+            - result: (...batch, tokens, d_model)
+            - K: (..., h, tokens, d_k)
+            - V: (..., h, tokens, d_v) # note that d_v = d_k in this architecture
         """
 
         assert x.shape[-1] == self.d_model, "invalid model"
@@ -120,8 +133,8 @@ class MultiHeadSelfAttention(nn.Module):
         if token_positions is not None:
             token_positions = token_positions.unsqueeze(-3)  # (...batch, 1, tokens)
         if self.rope:
-            Q = self.rope(Q, token_positions)
-            K = self.rope(K, token_positions)  # shape unchanged
+            Q: torch.Tensor = self.rope(Q, token_positions)
+            K: torch.Tensor = self.rope(K, token_positions)  # shape unchanged
         V_flat = x @ self.WV.T
         V = V_flat.reshape(*V_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
 
@@ -129,4 +142,62 @@ class MultiHeadSelfAttention(nn.Module):
         mask = torch.tril(torch.ones((tokens, tokens), dtype=torch.bool, device=x.device))  # (tokens, tokens)
         out = scaled_dot_product_attention(Q, K, V, mask)  # (...batch, h, tokens, d_k)
         out_flat = out.transpose(-2, -3).flatten(-2, -1)  # (...batch, tokens, d_model)
-        return out_flat @ self.WO.T  # (...batch, tokens, d_model)
+        return out_flat @ self.WO.T, K, V
+
+    def forward_one_token(
+        self, K_prefix: torch.Tensor, V_prefix: torch.Tensor, x: torch.Tensor, x_position: torch.Tensor | None = None
+    ):
+        """
+        `K`: (..., heads, tokens, d_k)
+        `V`: (..., heads, tokens, d_v)
+        `x`: (..., d_model) the new token at last
+        `x_position`: (..., )
+
+        return:
+            - result: (..., d_model)
+            - K: (..., h, tokens + 1, d_k)
+            - V: (..., h, tokens + 1, d_v) # note that d_v = d_k in this architecture
+        """
+        x = x.unsqueeze(-2)  # (...,1,d_model)
+
+        k_new_flat = x @ self.WK.T  # (..., 1, d_model)
+        k_new = split_heads(k_new_flat, self.num_heads)  # (...,h,1,d_k)
+
+        q_new_flat = x @ self.WQ.T  # (...,1,d_model)
+        q_new = split_heads(q_new_flat, self.num_heads)  # (...,h,1,d_k)
+
+        v_new_flat = x @ self.WV.T  # (...,1,d_model)
+        v_new = split_heads(v_new_flat, self.num_heads)  # (...,h,1,d_v)
+
+        if self.rope is not None:
+            if x_position is None:
+                # if none, new token position is len(prefix)
+                x_position = torch.full((*x.shape[:-1],), K_prefix.shape[-2], device=x.device, dtype=torch.long)
+            else:
+                assert x_position.shape == x.shape[:-1]
+            x_position = x_position.unsqueeze(-1) # (..., 1)
+            k_new = self.rope(k_new, x_position)
+            q_new = self.rope(q_new, x_position)
+
+        # we copy full KV for this assignment, but for further optimization we could reduce the cost of copy using a better allocaation
+        # strategy
+        K = torch.cat((K_prefix, k_new), dim=-2)  # (...,h,tokens+1,d_k)
+        V = torch.cat((V_prefix, v_new), dim=-2)  # (...,h,tokens+1,d_v)
+
+        # no mask required here. x has access to itself and all token in prefix
+        out = scaled_dot_product_attention(
+            q_new, # (...,h,1,d_k)
+            K, # (...,h,tokens+1,d_k)
+            V, # (...,h,tokens+1,d_v)
+        ) # (...,h,1,d_v)
+
+        out_flat = out.transpose(-2,-3).flatten(-2,-1) # (...,1,d_model)
+        result = (out_flat @ self.WO.T).flatten(-2,-1) # (...,d_model)
+        return result, K, V
+
+def split_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
+    """
+    `x`: (...,tokens,d)
+    return: (...,heads,tokens,d//heads)
+    """
+    return x.reshape(*x.shape[:-1], num_heads, x.shape[-1] // num_heads).transpose(-2, -3)
