@@ -130,9 +130,9 @@ class MultiHeadSelfAttention(nn.Module):
         Q = Q_flat.reshape(*Q_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
         K_flat = x @ self.WK.T
         K = K_flat.reshape(*K_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
-        if token_positions is not None:
-            token_positions = token_positions.unsqueeze(-3)  # (...batch, 1, tokens)
         if self.rope:
+            if token_positions is not None:
+                token_positions = token_positions.unsqueeze(-2) # (...,h,tokens)
             Q: torch.Tensor = self.rope(Q, token_positions)
             K: torch.Tensor = self.rope(K, token_positions)  # shape unchanged
         V_flat = x @ self.WV.T
@@ -158,6 +158,7 @@ class MultiHeadSelfAttention(nn.Module):
             - K: (..., h, tokens + 1, d_k)
             - V: (..., h, tokens + 1, d_v) # note that d_v = d_k in this architecture
         """
+        num_batch_dimension = len(x.shape) - 1 
         x = x.unsqueeze(-2)  # (...,1,d_model)
 
         k_new_flat = x @ self.WK.T  # (..., 1, d_model)
@@ -172,10 +173,11 @@ class MultiHeadSelfAttention(nn.Module):
         if self.rope is not None:
             if x_position is None:
                 # if none, new token position is len(prefix)
-                x_position = torch.full((*x.shape[:-1],), K_prefix.shape[-2], device=x.device, dtype=torch.long)
-            else:
-                assert x_position.shape == x.shape[:-1]
-            x_position = x_position.unsqueeze(-1) # (..., 1)
+                x_position = torch.full([1] * num_batch_dimension, K_prefix.shape[-2], device=x.device, dtype=torch.long)
+            # add head dimension
+            x_position = x_position.unsqueeze(-1) # (...,1)
+            # add token dimension
+            x_position = x_position.unsqueeze(-1) # (...,1,1)
             k_new = self.rope(k_new, x_position)
             q_new = self.rope(q_new, x_position)
 
