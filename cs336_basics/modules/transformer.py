@@ -147,7 +147,7 @@ class TransformerLM(nn.Module):
         return x, kv_cache
 
     def decode_step(
-        self, kv_cache: list[tuple[torch.Tensor, torch.Tensor]], token_id: torch.Tensor, token_position: torch.Tensor
+        self, kv_cache: list[tuple[torch.Tensor, torch.Tensor]], token_id: torch.Tensor, token_position: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
         """
         - `kv_cache`: KV for each layer for prefix tokens
