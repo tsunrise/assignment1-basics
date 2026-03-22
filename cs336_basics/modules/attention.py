@@ -1,8 +1,8 @@
 import torch
 from torch import nn
-from cs336_basics.modules.softmax import softmax
 from cs336_basics.modules.util import initialized_linear_weights
 from cs336_basics.modules.rope import RoPE
+import math
 
 
 def scaled_dot_product_attention(
@@ -18,20 +18,15 @@ def scaled_dot_product_attention(
     return: weighted average of `V` for each token based on attention
             (...batch, queries_len, d_v)
     """
-    # score[i,j] := attention weight of token j for token i
     d_k = Q.shape[-1]
-    assert Q.shape[-1] == K.shape[-1]
-    assert K.shape[:-1] == V.shape[:-1]
-    assert K.shape[:-2] == V.shape[:-2]
-    raw_score: torch.Tensor = (torch.einsum("...qd,...kd->...qk", Q, K)) / d_k**0.5  # (...batch, queries, keys)
+    assert K.shape[-1] == d_k
+    assert V.shape[-2] == K.shape[-2]
+
+    logits = Q @ K.transpose(-1, -2) / math.sqrt(d_k)  # (..., queries, keys)
     if mask is not None:
-        raw_score = raw_score.masked_fill(~mask, float("-inf"))
-
-    scores = softmax(raw_score, -1)
-
-    # (...batch, queries, keys) @ (...batch, keys, d_v)
-    results = torch.einsum("...qk,...kd->...qd", scores, V)
-    return results
+        logits.masked_fill_(~mask, float("-inf"))
+    out = torch.softmax(logits, dim=-1) @ V  # (..., queries, d_v)
+    return out
 
 
 def scaled_dot_product_attention_flash(
@@ -43,44 +38,54 @@ def scaled_dot_product_attention_flash(
     mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    - `Q`: (...batch, queries, d)
-    - `K`: (...batch, keys, d)
-    - `V`: (...batch, keys, d)
+    - `Q`: (...batch, queries, d_k)
+    - `K`: (...batch, keys, d_k)
+    - `V`: (...batch, keys, d_v)
     - `mask`: (...batch, queries_len, key_len) boolean
       `mask[i][j] = False` iff token_i should not consider token_j
 
     return: weighted average of `V` for each token based on attention
-            (...batch, queries_len, d)
+            (...batch, queries, d_v)
     """
-    d = Q.shape[-1]
-    assert Q.shape[-1] == K.shape[-1]
-    assert K.shape[:-1] == V.shape[:-1]
-    assert Q.shape[-2] % q_block_size == 0
-    assert K.shape[-2] % k_block_size == 0
+    d_k = Q.shape[-1]
+    assert K.shape[-1] == d_k
+    num_queries = Q.shape[-2]
+    num_keys = K.shape[-2]
+    assert V.shape[-2] == num_keys
+    batch_dims = Q.shape[:-2]
+    d_v = V.shape[-1]
+    assert num_queries % q_block_size == 0
+    assert num_keys % k_block_size == 0
 
-    # sum over k: softmax numerator * V
-    numerator = torch.zeros_like(Q, device=Q.device, dtype=Q.dtype)  # (...batch, queries, d)
-    # running softmax denominator
-    denominator = torch.zeros(*Q.shape[:-1], device=Q.device, dtype=Q.dtype)  # (...batch, queries)
-    # a running max for this query
-    running_max = torch.full(Q.shape[:-1], float("-inf"), device=Q.device, dtype=Q.dtype)  # (...batch, queries)
-    for q in range(0, Q.shape[-2], q_block_size):
-        for k in range(0, K.shape[-2], k_block_size):
-            logits = torch.einsum(
-                "...qd,...kd->...qk", Q[..., q : q + q_block_size, :], K[..., k : k + k_block_size, :]
-            ) / (d**0.5)  # (...,q_block,k_block)
+    result = torch.zeros(*batch_dims, num_queries, d_v, dtype=Q.dtype)
+
+    for q in range(0, num_queries, q_block_size):
+        # numerator part in result, updated incrementally
+        # [e^{q_ij - max_r q_ir}]_j . V_i*
+        numerator = torch.zeros(*batch_dims, q_block_size, d_v, dtype=Q.dtype)
+        # denominator part in result, updated incrementally
+        # \sum_{j} e^{q_ij - max_r q_ir}
+        denominator = torch.zeros(*batch_dims, q_block_size, dtype=Q.dtype)
+        # for tracking max_r q_ir
+        running_max = torch.full((*batch_dims, q_block_size), float("-inf"), dtype=Q.dtype)
+        for k in range(0, num_keys, k_block_size):
+            q_block = Q[..., q : q + q_block_size, :]  # (...,q_block,d_k)
+            k_block = K[..., k : k + k_block_size, :]  # (...,k_block,d_k)
+            v_block = V[..., k : k + k_block_size, :]  # (...,k_block,d_v)
+            logits = q_block @ k_block.transpose(-1, -2) / math.sqrt(d_k)  # (...,q_block,k_block)
             if mask is not None:
-                logits = logits.masked_fill(~mask[..., q : q + q_block_size, k : k + k_block_size], float("-inf"))
-            prev_max = running_max[..., q : q + q_block_size].clone()  # (..., q_block)
-            new_max = torch.maximum(prev_max, logits.max(dim=-1).values)
-            running_max[..., q : q + q_block_size] = new_max
-            denominator[..., q : q + q_block_size] *= torch.exp(prev_max - new_max)  # rescale
-            denominator[..., q : q + q_block_size] += torch.sum(torch.exp(logits - new_max.unsqueeze(-1)), dim=-1)
-            numerator[..., q : q + q_block_size, :] *= torch.exp(prev_max - new_max).unsqueeze(-1)
-            numerator[..., q : q + q_block_size, :] += torch.einsum(
-                "...qk,...kd->...qd", torch.exp(logits - new_max.unsqueeze(-1)), V[..., k : k + k_block_size, :]
-            )
-    return numerator / denominator.unsqueeze(-1)
+                logits.masked_fill_(~mask[..., q : q + q_block_size, k : k + k_block_size], float("-inf"))
+            curr_block_max = torch.max(logits, dim=-1).values  # (...,q_block)
+            curr_max = torch.maximum(running_max, curr_block_max)
+            rescale = torch.exp(running_max - curr_max)  # (..., q_block)
+            running_max = curr_max
+            numerator *= rescale.unsqueeze(-1)
+            curr_softmax_term = torch.exp(logits - curr_max.unsqueeze(-1))  # (...,q_block,k_block)
+            numerator += curr_softmax_term @ v_block  # (...,q_block,d_v)
+            denominator *= rescale
+            denominator += torch.sum(curr_softmax_term, dim=-1)
+        result[..., q : q + q_block_size, :] = numerator / denominator.unsqueeze(-1)
+    return result
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -123,33 +128,34 @@ class MultiHeadSelfAttention(nn.Module):
             - K: (..., h, tokens, d_k)
             - V: (..., h, tokens, d_v) # note that d_v = d_k in this architecture
         """
+        if token_positions is not None:
+            assert token_positions.shape[-1] == x.shape[-2]
 
-        assert x.shape[-1] == self.d_model, "invalid model"
-        tokens = x.shape[-2]  # number of tokens
-        Q_flat = x @ self.WQ.T  # (...batch, tokens, d_model)
-        Q = Q_flat.reshape(*Q_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
-        K_flat = x @ self.WK.T
-        K = K_flat.reshape(*K_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
+        tokens = x.shape[-2]
+        Qf = x @ self.WQ.T  # (..., tokens, d_k * num_heads)
+        Kf = x @ self.WK.T  # (..., tokens, d_k * num_heads)
+        Vf = x @ self.WV.T  # (..., tokens, d_v * num_heads)
+
+        Q = Qf.reshape(*Qf.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (..., heads, tokens, d_k)
+        K = Kf.reshape(*Kf.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (..., heads, tokens, d_k)
+        V = Vf.reshape(*Vf.shape[:-1], self.num_heads, self.d_v).transpose(-2, -3)  # (..., heads, tokens, d_v)
+
         if self.rope:
-            if token_positions is not None:
-                token_positions = token_positions.unsqueeze(-2) # (...,h,tokens)
-            Q: torch.Tensor = self.rope(Q, token_positions)
-            K: torch.Tensor = self.rope(K, token_positions)  # shape unchanged
-        V_flat = x @ self.WV.T
-        V = V_flat.reshape(*V_flat.shape[:-1], self.num_heads, self.d_k).transpose(-2, -3)  # (...batch, h, tokens, d_k)
+            Q = self.rope(Q)
+            K = self.rope(K)
 
-        # mask[i][j] = True iff j <= i
-        mask = torch.tril(torch.ones((tokens, tokens), dtype=torch.bool, device=x.device))  # (tokens, tokens)
-        out = scaled_dot_product_attention(Q, K, V, mask)  # (...batch, h, tokens, d_k)
-        out_flat = out.transpose(-2, -3).flatten(-2, -1)  # (...batch, tokens, d_model)
-        return out_flat @ self.WO.T, K, V
+        mask = torch.tril(torch.ones(tokens, tokens, dtype=torch.bool))
+        out = scaled_dot_product_attention(Q, K, V, mask)  # (..., heads, tokens, d_v)
+        outf = out.transpose(-2, -3).flatten(-2, -1)  # (..., tokens, heads * d_v)
+        result = outf @ self.WO.T  # (..., tokens, d_model)
+        return result, K, V
 
     def forward_one_token(
         self, K_prefix: torch.Tensor, V_prefix: torch.Tensor, x: torch.Tensor, x_position: torch.Tensor | None = None
     ):
         """
-        `K`: (..., heads, tokens, d_k)
-        `V`: (..., heads, tokens, d_v)
+        `K_prefix`: (..., heads, tokens, d_k)
+        `V_prefix`: (..., heads, tokens, d_v)
         `x`: (..., d_model) the new token at last
         `x_position`: (..., )
 
@@ -158,44 +164,31 @@ class MultiHeadSelfAttention(nn.Module):
             - K: (..., h, tokens + 1, d_k)
             - V: (..., h, tokens + 1, d_v) # note that d_v = d_k in this architecture
         """
-        num_batch_dimension = len(x.shape) - 1 
-        x = x.unsqueeze(-2)  # (...,1,d_model)
+        num_heads, num_tokens, d_k = K_prefix.shape[-3:]
 
-        k_new_flat = x @ self.WK.T  # (..., 1, d_model)
-        k_new = split_heads(k_new_flat, self.num_heads)  # (...,h,1,d_k)
+        kf = x @ self.WK.T  # (...,d_k * num_heads)
+        vf = x @ self.WV.T  # (...,d_v * num_heads)
+        qf = x @ self.WQ.T  # (...,d_q * num_heads)
 
-        q_new_flat = x @ self.WQ.T  # (...,1,d_model)
-        q_new = split_heads(q_new_flat, self.num_heads)  # (...,h,1,d_k)
+        if x_position is None:
+            x_position = torch.full((), num_tokens, dtype=torch.long)
 
-        v_new_flat = x @ self.WV.T  # (...,1,d_model)
-        v_new = split_heads(v_new_flat, self.num_heads)  # (...,h,1,d_v)
+        k = kf.reshape(*kf.shape[:-1], num_heads, self.d_k).unsqueeze(-2)  # (...,num_heads,1,d_k)
+        v = vf.reshape(*vf.shape[:-1], num_heads, self.d_v).unsqueeze(-2)  # (...,num_heads,1,d_v)
+        q = qf.reshape(*qf.shape[:-1], num_heads, self.d_k).unsqueeze(-2)  # (...,num_heads,1,d_k)
+        if self.rope:
+            k = self.rope(k, x_position)
+            q = self.rope(q, x_position)
 
-        if self.rope is not None:
-            if x_position is None:
-                # if none, new token position is len(prefix)
-                x_position = torch.full([1] * num_batch_dimension, K_prefix.shape[-2], device=x.device, dtype=torch.long)
-            # add head dimension
-            x_position = x_position.unsqueeze(-1) # (...,1)
-            # add token dimension
-            x_position = x_position.unsqueeze(-1) # (...,1,1)
-            k_new = self.rope(k_new, x_position)
-            q_new = self.rope(q_new, x_position)
+        K = torch.cat([K_prefix, k], dim=-2)  # (...,num_heads,tokens + 1, d_k)
+        V = torch.cat([V_prefix, v], dim=-2)  # same
 
-        # we copy full KV for this assignment, but for further optimization we could reduce the cost of copy using a better allocaation
-        # strategy
-        K = torch.cat((K_prefix, k_new), dim=-2)  # (...,h,tokens+1,d_k)
-        V = torch.cat((V_prefix, v_new), dim=-2)  # (...,h,tokens+1,d_v)
+        out = scaled_dot_product_attention(q, K, V)  # (...,heads,1,d_v)
+        out_f = out.transpose(-2, -3).flatten(-2, -1)  # (...,1,heads * d_v)
 
-        # no mask required here. x has access to itself and all token in prefix
-        out = scaled_dot_product_attention(
-            q_new, # (...,h,1,d_k)
-            K, # (...,h,tokens+1,d_k)
-            V, # (...,h,tokens+1,d_v)
-        ) # (...,h,1,d_v)
+        result = out_f @ self.WO.T  # (...,1,d_model)
+        return result.flatten(-2, -1), K, V
 
-        out_flat = out.transpose(-2,-3).flatten(-2,-1) # (...,1,d_model)
-        result = (out_flat @ self.WO.T).flatten(-2,-1) # (...,d_model)
-        return result, K, V
 
 def split_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
     """
@@ -203,3 +196,61 @@ def split_heads(x: torch.Tensor, num_heads: int) -> torch.Tensor:
     return: (...,heads,tokens,d//heads)
     """
     return x.reshape(*x.shape[:-1], num_heads, x.shape[-1] // num_heads).transpose(-2, -3)
+
+
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, d_model: int, num_q_heads: int, group_size: int, rope: RoPE | None = None):
+        """
+        - `rope`: Rotatary Positional Embedding with `d_k = d_model / num_heads`
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.num_q_heads = num_q_heads
+        self.group_size = group_size
+        assert num_q_heads % group_size == 0
+        self.num_kv_heads = num_q_heads // group_size
+        assert d_model % num_q_heads == 0
+        self.d_k = d_model // self.num_q_heads
+        self.d_v = self.d_k
+
+        self.WQ = nn.Parameter(initialized_linear_weights(d_model, self.num_q_heads * self.d_k))
+        self.WK = nn.Parameter(initialized_linear_weights(d_model, self.num_kv_heads * self.d_k))
+        self.WV = nn.Parameter(initialized_linear_weights(d_model, self.num_kv_heads * self.d_v))
+        self.WO = nn.Parameter(initialized_linear_weights(self.num_q_heads * self.d_v, d_model))
+
+        self.rope = rope
+        if rope is not None:
+            assert rope.d_k == self.d_k
+
+    def forward(self, x: torch.Tensor):
+        """
+        x: (...,tokens,d_model)
+        return: (...,tokens,d_model)
+        """
+        Qf = x @ self.WQ.T  # (...,tokens,d_k * num_q_heads)
+        Kf = x @ self.WK.T  # (...,tokens,d_k * num_kv_heads)
+        Vf = x @ self.WV.T  # (...,tokens,d_v * num_kv_heads)
+
+        tokens = x.shape[-2]
+
+        Q = Qf.reshape(*Qf.shape[:-1], self.num_q_heads, self.d_k).transpose(-2, -3)  # (...,num_q_heads,tokens,d_k)
+        K = Kf.reshape(*Kf.shape[:-1], self.num_kv_heads, self.d_k).transpose(-2, -3)  # (...,num_kv_heads,tokens,d_k)
+        V = Vf.reshape(*Vf.shape[:-1], self.num_kv_heads, self.d_v).transpose(-2, -3)  # (...,num_kv_heads,tokens,d_v)
+
+        Qg = Q.reshape(
+            *Q.shape[:-3], self.num_kv_heads,self.group_size, tokens, self.d_k
+        )  # (...,groups,kv_heads,tokens,d_k)
+        Kg = K.reshape(*K.shape[:-3], self.num_kv_heads, 1, tokens, self.d_k)  # (...,1,kv_heads,tokens,d_k)
+        Vg = V.reshape(*V.shape[:-3], self.num_kv_heads, 1, tokens, self.d_v)  # (...,1,kv_heads,tokens,d_v)
+
+        if self.rope:
+            Qg = self.rope(Qg)
+            Kg = self.rope(Kg)
+
+        mask = torch.tril(torch.ones((tokens, tokens), dtype=torch.bool))
+
+        out_g = scaled_dot_product_attention(Qg, Kg, Vg, mask)  # (...,kv_heads,groups,tokens,d_v)
+        out_f = out_g.flatten(-4, -3)  # (...,num_q_heads,tokens,d_v)
+        out = out_f.transpose(-2, -3).flatten(-2, -1)  # (...,tokens,num_q_heads * d_v)
+        result = out @ self.WO.T  # (...,tokens, d_model)
+        return result
